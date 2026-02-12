@@ -1,0 +1,289 @@
+# =============================================================================
+# Azure DevOps Pipeline: Microsoft Sentinel + Log Analytics Workspace
+# =============================================================================
+# Deploys a Log Analytics workspace with Microsoft Sentinel enabled,
+# configures free data connectors, UEBA, Pay-As-You-Go pricing,
+# daily ingestion cap, and default table retention.
+#
+# All key settings are exposed as variables for reuse across environments.
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'Security/SIEM - SOAR/Sentinel-Deployment/**'
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'Security/SIEM - SOAR/Sentinel-Deployment/**'
+
+# ---------------------------------------------------------------------------
+# Variables - modify these to reuse across environments
+# ---------------------------------------------------------------------------
+variables:
+
+  # --- Subscription & Resource Group ---
+  azureSubscriptionId: 'YOUR_SUBSCRIPTION_ID'
+  resourceGroupName: 'rg-sentinel-prod'
+  location: 'uksouth'
+
+  # --- Workspace Configuration ---
+  workspaceName: 'law-sentinel-prod'
+  skuName: 'PerGB2018'                  # Pay-As-You-Go tier
+  dailyQuotaGb: '0.005'                 # 5 MB daily cap (0.005 GB)
+  retentionInDays: 90                    # Default table retention in days
+
+  # --- Data Connectors (true/false) ---
+  enableAzureActivityConnector: true
+  enableEntraIDConnector: true
+  enableM365DefenderConnector: true
+  enableThreatIntelConnector: true
+
+  # --- UEBA ---
+  enableUEBA: true
+
+  # --- Tags ---
+  tagEnvironment: 'Production'
+  tagManagedBy: 'AzureDevOps'
+  tagSolution: 'MicrosoftSentinel'
+
+  # --- Template Path ---
+  templateFile: 'Security/SIEM - SOAR/Sentinel-Deployment/sentinel-deployment.json'
+
+# ---------------------------------------------------------------------------
+# Stages
+# ---------------------------------------------------------------------------
+stages:
+
+  # =========================================================================
+  # Stage 1: Validate
+  # =========================================================================
+  - stage: Validate
+    displayName: 'Validate ARM Template'
+    jobs:
+      - job: ValidateTemplate
+        displayName: 'Validate Sentinel ARM Template'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+
+          - checkout: self
+            displayName: 'Checkout Repository'
+
+          - task: AzureCLI@2
+            displayName: 'Create Resource Group (if not exists)'
+            inputs:
+              azureSubscription: '$(azureSubscriptionId)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az group create \
+                  --name "$(resourceGroupName)" \
+                  --location "$(location)" \
+                  --tags \
+                    Environment="$(tagEnvironment)" \
+                    ManagedBy="$(tagManagedBy)" \
+                    Solution="$(tagSolution)"
+
+          - task: AzureCLI@2
+            displayName: 'Validate ARM Template'
+            inputs:
+              azureSubscription: '$(azureSubscriptionId)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az deployment group validate \
+                  --resource-group "$(resourceGroupName)" \
+                  --template-file "$(templateFile)" \
+                  --parameters \
+                    workspaceName="$(workspaceName)" \
+                    location="$(location)" \
+                    skuName="$(skuName)" \
+                    dailyQuotaGb="$(dailyQuotaGb)" \
+                    retentionInDays=$(retentionInDays) \
+                    enableAzureActivityConnector=$(enableAzureActivityConnector) \
+                    enableEntraIDConnector=$(enableEntraIDConnector) \
+                    enableM365DefenderConnector=$(enableM365DefenderConnector) \
+                    enableThreatIntelConnector=$(enableThreatIntelConnector) \
+                    enableUEBA=$(enableUEBA)
+
+          - task: AzureCLI@2
+            displayName: 'What-If Analysis (preview changes)'
+            inputs:
+              azureSubscription: '$(azureSubscriptionId)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az deployment group what-if \
+                  --resource-group "$(resourceGroupName)" \
+                  --template-file "$(templateFile)" \
+                  --parameters \
+                    workspaceName="$(workspaceName)" \
+                    location="$(location)" \
+                    skuName="$(skuName)" \
+                    dailyQuotaGb="$(dailyQuotaGb)" \
+                    retentionInDays=$(retentionInDays) \
+                    enableAzureActivityConnector=$(enableAzureActivityConnector) \
+                    enableEntraIDConnector=$(enableEntraIDConnector) \
+                    enableM365DefenderConnector=$(enableM365DefenderConnector) \
+                    enableThreatIntelConnector=$(enableThreatIntelConnector) \
+                    enableUEBA=$(enableUEBA)
+
+  # =========================================================================
+  # Stage 2: Deploy
+  # =========================================================================
+  - stage: Deploy
+    displayName: 'Deploy Sentinel'
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeploySentinel
+        displayName: 'Deploy Sentinel to Azure'
+        pool:
+          vmImage: 'ubuntu-latest'
+        environment: 'sentinel-production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                - checkout: self
+                  displayName: 'Checkout Repository'
+
+                - task: AzureCLI@2
+                  displayName: 'Create Resource Group (if not exists)'
+                  inputs:
+                    azureSubscription: '$(azureSubscriptionId)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az group create \
+                        --name "$(resourceGroupName)" \
+                        --location "$(location)" \
+                        --tags \
+                          Environment="$(tagEnvironment)" \
+                          ManagedBy="$(tagManagedBy)" \
+                          Solution="$(tagSolution)"
+
+                - task: AzureCLI@2
+                  displayName: 'Deploy Sentinel ARM Template'
+                  inputs:
+                    azureSubscription: '$(azureSubscriptionId)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "============================================="
+                      echo "Deploying Microsoft Sentinel"
+                      echo "============================================="
+                      echo "Workspace:     $(workspaceName)"
+                      echo "Region:        $(location)"
+                      echo "SKU:           $(skuName)"
+                      echo "Daily Cap:     $(dailyQuotaGb) GB"
+                      echo "Retention:     $(retentionInDays) days"
+                      echo "UEBA:          $(enableUEBA)"
+                      echo "============================================="
+
+                      az deployment group create \
+                        --name "sentinel-$(Build.BuildNumber)" \
+                        --resource-group "$(resourceGroupName)" \
+                        --template-file "$(templateFile)" \
+                        --parameters \
+                          workspaceName="$(workspaceName)" \
+                          location="$(location)" \
+                          skuName="$(skuName)" \
+                          dailyQuotaGb="$(dailyQuotaGb)" \
+                          retentionInDays=$(retentionInDays) \
+                          enableAzureActivityConnector=$(enableAzureActivityConnector) \
+                          enableEntraIDConnector=$(enableEntraIDConnector) \
+                          enableM365DefenderConnector=$(enableM365DefenderConnector) \
+                          enableThreatIntelConnector=$(enableThreatIntelConnector) \
+                          enableUEBA=$(enableUEBA)
+
+                - task: AzureCLI@2
+                  displayName: 'Verify Deployment Outputs'
+                  inputs:
+                    azureSubscription: '$(azureSubscriptionId)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "--- Deployment Outputs ---"
+                      az deployment group show \
+                        --name "sentinel-$(Build.BuildNumber)" \
+                        --resource-group "$(resourceGroupName)" \
+                        --query "properties.outputs" \
+                        --output table
+
+                      echo ""
+                      echo "--- Workspace Details ---"
+                      az monitor log-analytics workspace show \
+                        --workspace-name "$(workspaceName)" \
+                        --resource-group "$(resourceGroupName)" \
+                        --query "{Name:name, Location:location, SKU:sku.name, RetentionDays:retentionInDays, DailyCapGb:workspaceCapping.dailyQuotaGb, CustomerId:customerId}" \
+                        --output table
+
+  # =========================================================================
+  # Stage 3: Post-Deployment Verification
+  # =========================================================================
+  - stage: Verify
+    displayName: 'Post-Deployment Verification'
+    dependsOn: Deploy
+    condition: succeeded()
+    jobs:
+      - job: VerifySentinel
+        displayName: 'Verify Sentinel Configuration'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+
+          - task: AzureCLI@2
+            displayName: 'Verify Sentinel is enabled'
+            inputs:
+              azureSubscription: '$(azureSubscriptionId)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "=== Checking Sentinel Solutions ==="
+                az monitor log-analytics solution list \
+                  --resource-group "$(resourceGroupName)" \
+                  --query "[?contains(name, 'SecurityInsights')].{Name:name, Plan:plan.product}" \
+                  --output table
+
+          - task: AzureCLI@2
+            displayName: 'Verify workspace settings'
+            inputs:
+              azureSubscription: '$(azureSubscriptionId)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "=== Workspace Configuration ==="
+                az monitor log-analytics workspace show \
+                  --workspace-name "$(workspaceName)" \
+                  --resource-group "$(resourceGroupName)" \
+                  --output jsonc
+
+                echo ""
+                echo "=== Retention & Cap Summary ==="
+                RETENTION=$(az monitor log-analytics workspace show \
+                  --workspace-name "$(workspaceName)" \
+                  --resource-group "$(resourceGroupName)" \
+                  --query "retentionInDays" --output tsv)
+                DAILY_CAP=$(az monitor log-analytics workspace show \
+                  --workspace-name "$(workspaceName)" \
+                  --resource-group "$(resourceGroupName)" \
+                  --query "workspaceCapping.dailyQuotaGb" --output tsv)
+
+                echo "Retention:  ${RETENTION} days"
+                echo "Daily Cap:  ${DAILY_CAP} GB"
+
+                if [ "$RETENTION" == "$(retentionInDays)" ]; then
+                  echo "PASS: Retention matches expected value"
+                else
+                  echo "WARN: Retention is ${RETENTION}, expected $(retentionInDays)"
+                fi

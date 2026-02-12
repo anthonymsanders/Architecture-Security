@@ -1,0 +1,267 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Deploys a Log Analytics Workspace with Microsoft Sentinel, free data connectors, and UEBA enabled."
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "uksouth",
+      "metadata": {
+        "description": "Azure region for deployment."
+      }
+    },
+    "skuName": {
+      "type": "string",
+      "defaultValue": "PerGB2018",
+      "allowedValues": [
+        "PerGB2018",
+        "CapacityReservation"
+      ],
+      "metadata": {
+        "description": "Log Analytics pricing tier. PerGB2018 = Pay-As-You-Go."
+      }
+    },
+    "dailyQuotaGb": {
+      "type": "string",
+      "defaultValue": "0.005",
+      "metadata": {
+        "description": "Daily ingestion cap in GB. 0.005 GB = 5 MB."
+      }
+    },
+    "retentionInDays": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 30,
+      "maxValue": 730,
+      "metadata": {
+        "description": "Default data retention in days for workspace tables."
+      }
+    },
+    "enableAzureActivityConnector": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable the Azure Activity free data connector."
+      }
+    },
+    "enableEntraIDConnector": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable the Microsoft Entra ID (Azure AD) Sign-In and Audit Logs connector."
+      }
+    },
+    "enableM365DefenderConnector": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable the Microsoft 365 Defender connector."
+      }
+    },
+    "enableThreatIntelConnector": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable the Microsoft Threat Intelligence connector."
+      }
+    },
+    "enableUEBA": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable User and Entity Behavior Analytics (UEBA)."
+      }
+    },
+    "uebaSources": {
+      "type": "array",
+      "defaultValue": [
+        "AuditLogs",
+        "AzureActivity",
+        "SecurityEvent",
+        "SigninLogs"
+      ],
+      "metadata": {
+        "description": "Data sources to feed into UEBA."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {
+        "Environment": "Production",
+        "ManagedBy": "AzureDevOps",
+        "Solution": "MicrosoftSentinel"
+      },
+      "metadata": {
+        "description": "Resource tags applied to all deployed resources."
+      }
+    }
+  },
+  "variables": {
+    "sentinelSolutionName": "[concat('SecurityInsights(', parameters('workspaceName'), ')')]",
+    "sentinelSolutionProduct": "OMSGallery/SecurityInsights"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[parameters('workspaceName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "sku": {
+          "name": "[parameters('skuName')]"
+        },
+        "retentionInDays": "[parameters('retentionInDays')]",
+        "workspaceCapping": {
+          "dailyQuotaGb": "[json(parameters('dailyQuotaGb'))]"
+        },
+        "features": {
+          "enableDataExport": false
+        },
+        "publicNetworkAccessForIngestion": "Enabled",
+        "publicNetworkAccessForQuery": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.OperationsManagement/solutions",
+      "apiVersion": "2015-11-01-preview",
+      "name": "[variables('sentinelSolutionName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+      ],
+      "plan": {
+        "name": "[variables('sentinelSolutionName')]",
+        "publisher": "Microsoft",
+        "product": "[variables('sentinelSolutionProduct')]",
+        "promotionCode": ""
+      },
+      "properties": {
+        "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+      }
+    },
+    {
+      "condition": "[parameters('enableUEBA')]",
+      "type": "Microsoft.SecurityInsights/settings",
+      "apiVersion": "2024-03-01",
+      "name": "Ueba",
+      "scope": "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationsManagement/solutions', variables('sentinelSolutionName'))]"
+      ],
+      "kind": "Ueba",
+      "properties": {
+        "dataSources": "[parameters('uebaSources')]"
+      }
+    },
+    {
+      "condition": "[parameters('enableAzureActivityConnector')]",
+      "type": "Microsoft.SecurityInsights/dataConnectors",
+      "apiVersion": "2024-03-01",
+      "name": "[guid(parameters('workspaceName'), 'AzureActivity')]",
+      "scope": "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationsManagement/solutions', variables('sentinelSolutionName'))]"
+      ],
+      "kind": "AzureActivity",
+      "properties": {
+        "linkedResourceId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/microsoft.insights/eventtypes/management')]"
+      }
+    },
+    {
+      "condition": "[parameters('enableEntraIDConnector')]",
+      "type": "Microsoft.SecurityInsights/dataConnectors",
+      "apiVersion": "2024-03-01",
+      "name": "[guid(parameters('workspaceName'), 'AzureActiveDirectory')]",
+      "scope": "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationsManagement/solutions', variables('sentinelSolutionName'))]"
+      ],
+      "kind": "AzureActiveDirectory",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "dataTypes": {
+          "alerts": {
+            "state": "Enabled"
+          },
+          "signinLogs": {
+            "state": "Enabled"
+          },
+          "auditLogs": {
+            "state": "Enabled"
+          }
+        }
+      }
+    },
+    {
+      "condition": "[parameters('enableM365DefenderConnector')]",
+      "type": "Microsoft.SecurityInsights/dataConnectors",
+      "apiVersion": "2024-03-01",
+      "name": "[guid(parameters('workspaceName'), 'MicrosoftDefenderAdvancedThreatProtection')]",
+      "scope": "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationsManagement/solutions', variables('sentinelSolutionName'))]"
+      ],
+      "kind": "MicrosoftDefenderAdvancedThreatProtection",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "dataTypes": {
+          "alerts": {
+            "state": "Enabled"
+          }
+        }
+      }
+    },
+    {
+      "condition": "[parameters('enableThreatIntelConnector')]",
+      "type": "Microsoft.SecurityInsights/dataConnectors",
+      "apiVersion": "2024-03-01",
+      "name": "[guid(parameters('workspaceName'), 'MicrosoftThreatIntelligence')]",
+      "scope": "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationsManagement/solutions', variables('sentinelSolutionName'))]"
+      ],
+      "kind": "MicrosoftThreatIntelligence",
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "dataTypes": {
+          "microsoftEmergingThreatFeed": {
+            "lookbackPeriod": "1970-01-01T00:00:00.000Z",
+            "state": "Enabled"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workspaceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+    },
+    "workspaceCustomerId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), '2022-10-01').customerId]"
+    },
+    "sentinelEnabled": {
+      "type": "bool",
+      "value": true
+    },
+    "retentionDays": {
+      "type": "int",
+      "value": "[parameters('retentionInDays')]"
+    },
+    "dailyCapMb": {
+      "type": "string",
+      "value": "[parameters('dailyQuotaGb')]"
+    }
+  }
+}
